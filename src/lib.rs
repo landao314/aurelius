@@ -69,6 +69,7 @@ use url::Url;
 
 use crate::id_map::IdMap;
 
+pub mod r#async;
 mod id_map;
 
 const STATIC_FILES: Dir = include_dir!("static");
