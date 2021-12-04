@@ -8,7 +8,7 @@ use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
-use hyper::header::HeaderValue;
+use hyper::header::{self, HeaderValue};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response};
 use thiserror::Error;
@@ -21,16 +21,21 @@ use url::Url;
 use tokio::io;
 use tokio::sync::broadcast;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize, Debug)]
 pub struct Position {
     line: usize,
     character: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct Update {
+#[derive(Clone, Serialize, Debug)]
+pub struct Range {
     start: Position,
     end: Position,
+}
+
+#[derive(Clone, Serialize, Debug)]
+pub struct Update {
+    range: Option<Range>,
     text: String,
 }
 
@@ -71,9 +76,9 @@ impl Server {
 
                         let res = Response::builder()
                             .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
-                            .header(hyper::header::CONNECTION, "upgrade")
-                            .header(hyper::header::UPGRADE, "websocket")
-                            .header("Sec-WebSocket-Accept", derive_accept_key(websocket_key))
+                            .header(header::CONNECTION, "upgrade")
+                            .header(header::UPGRADE, "websocket")
+                            .header(header::SEC_WEBSOCKET_ACCEPT, derive_accept_key(websocket_key))
                             .body(Body::empty())
                             .unwrap();
 
@@ -91,7 +96,11 @@ impl Server {
                             ).await;
 
                             while let Ok(update) = markdown_rx.recv().await {
-                                ws.send(Message::Text(format!("sent: {}", update.text))).await.unwrap(); // FIXME
+                                if let Some(range) = update.range {
+                                    todo!()
+                                } else {
+                                    ws.send(Message::Text(update.text)).await.unwrap(); // FIXME
+                                }
                             }
                         });
 
@@ -137,20 +146,8 @@ impl Server {
         })
     }
 
-    pub fn send(&self, s: &str) {
-        let res = self.markdown_tx.send(Update {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 0,
-            },
-            text: "Foo".to_string(),
-        });
-
-        println!("{:?}", res);
+    pub fn send(&self, update: Update) {
+        let _ = self.markdown_tx.send(update);
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -161,8 +158,8 @@ impl Server {
 fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {
     let headers = request.headers();
 
-    headers.get(hyper::header::CONNECTION) == Some(&HeaderValue::from_static("Upgrade"))
-        && headers.get(hyper::header::UPGRADE) == Some(&HeaderValue::from_static("websocket"))
+    headers.get(header::CONNECTION) == Some(&HeaderValue::from_static("Upgrade"))
+        && headers.get(header::UPGRADE) == Some(&HeaderValue::from_static("websocket"))
 }
 
 #[cfg(test)]
@@ -170,10 +167,10 @@ mod tests {
     use std::error::Error;
     use std::net::SocketAddr;
 
-    use tokio::io;
+    use futures::StreamExt;
     use tokio::net::{ToSocketAddrs, lookup_host};
 
-    use super::Server;
+    use super::{Server, Update};
 
     async fn new_server() -> Result<Server, Box<dyn Error>> {
             let addr = lookup_host("localhost:0").await?.next().unwrap();
@@ -194,10 +191,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_websocket_async() -> Result<(), Box<dyn Error>> {
+    async fn connect_websocket() -> Result<(), Box<dyn Error>> {
         let server = new_server().await?;
 
-        async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await.unwrap();
+        async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_with_no_clients() -> Result<(), Box<dyn Error>> {
+        let server = new_server().await?;
+
+        server.send(Update { range: None, text: String::from("This shouldn't hang") });
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn send_html() -> Result<(), Box<dyn Error>> {
+        let server = new_server().await?;
+
+        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+
+        server.send(Update {
+            range: None,
+            text: String::from("<p>Hello, world!</p>"),
+        });
+
+        let message = websocket.next().await.unwrap()?;
+        assert_eq!(message.to_text()?, "<p>Hello, world!</p>");
 
         Ok(())
     }

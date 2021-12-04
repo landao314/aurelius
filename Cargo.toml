@@ -33,6 +33,7 @@ async-tungstenite = "0.16.0"
 thiserror = "1.0.30"
 tokio-util = { version = "0.6.9", features = ["compat"] }
 futures-util = "0.3.18"
+futures = "0.3.18"
 
 [dev-dependencies]
 reqwest = { version = "0.11.7", default-features = false, features = ["blocking"] }
