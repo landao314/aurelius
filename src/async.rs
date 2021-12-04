@@ -14,17 +14,20 @@ use hyper::{Body, Request, Response};
 use thiserror::Error;
 use tokio::select;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
+use serde::Serialize;
+use handlebars::Handlebars;
+use url::Url;
 
 use tokio::io;
 use tokio::sync::broadcast;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Position {
     line: usize,
     character: usize,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Update {
     start: Position,
     end: Position,
@@ -56,7 +59,7 @@ impl Server {
 
             async move {
                 Ok::<_, Infallible>(service_fn(move |req: Request<Body>| {
-                    println!("{:?}", req);
+                    println!("got request {:?}", req);
 
                     let response = if is_websocket_upgrade(&req) {
                         let mut markdown_rx = markdown_tx.subscribe();
@@ -94,10 +97,26 @@ impl Server {
 
                         res
                     } else {
-                        // Handle normal HTTP
+                        #[derive(Debug, Serialize)]
+                        struct Data<'a> {
+                            remote_custom_css: &'a [Url],
+                            local_custom_css: &'a [String],
+                            highlight_theme: &'a str,
+                        }
+
+                        let template_data = Data {
+                            remote_custom_css: &[],
+                            local_custom_css: &[],
+                            highlight_theme: "github",
+                        };
+
+                        let html = Handlebars::new()
+                            .render_template(include_str!("../templates/markdown_view.html"), &template_data)
+                            .unwrap();
+
                         Response::builder()
                             .status(hyper::StatusCode::OK)
-                            .body(Body::empty())
+                            .body(Body::from(html))
                             .unwrap()
                     };
 
@@ -144,4 +163,42 @@ fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {
 
     headers.get(hyper::header::CONNECTION) == Some(&HeaderValue::from_static("Upgrade"))
         && headers.get(hyper::header::UPGRADE) == Some(&HeaderValue::from_static("websocket"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::net::SocketAddr;
+
+    use tokio::io;
+    use tokio::net::{ToSocketAddrs, lookup_host};
+
+    use super::Server;
+
+    async fn new_server() -> Result<Server, Box<dyn Error>> {
+            let addr = lookup_host("localhost:0").await?.next().unwrap();
+            Ok(Server::bind(&addr).await?)
+    }
+
+    #[tokio::test]
+    async fn connect_html() -> Result<(), Box<dyn Error>> {
+        let server = new_server().await?;
+
+        let body = reqwest::get(&format!("http://{}", server.addr())).await?
+            .text()
+            .await?;
+
+        assert!(body.contains("<html>"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_websocket_async() -> Result<(), Box<dyn Error>> {
+        let server = new_server().await?;
+
+        async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await.unwrap();
+
+        Ok(())
+    }
 }
