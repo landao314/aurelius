@@ -8,14 +8,14 @@ use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
+use handlebars::Handlebars;
 use hyper::header::{self, HeaderValue};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::select;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
-use serde::Serialize;
-use handlebars::Handlebars;
 use url::Url;
 
 use tokio::io;
@@ -69,7 +69,9 @@ impl Server {
                     let response = if is_websocket_upgrade(&req) {
                         let mut markdown_rx = markdown_tx.subscribe();
 
-                        let websocket_key = req.headers().get("Sec-WebSocket-Key")
+                        let websocket_key = req
+                            .headers()
+                            .get("Sec-WebSocket-Key")
                             .ok_or_else(|| ProtocolError::MissingSecWebSocketKey)
                             .unwrap() // FIXME
                             .as_bytes();
@@ -78,7 +80,10 @@ impl Server {
                             .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
                             .header(header::CONNECTION, "upgrade")
                             .header(header::UPGRADE, "websocket")
-                            .header(header::SEC_WEBSOCKET_ACCEPT, derive_accept_key(websocket_key))
+                            .header(
+                                header::SEC_WEBSOCKET_ACCEPT,
+                                derive_accept_key(websocket_key),
+                            )
                             .body(Body::empty())
                             .unwrap();
 
@@ -89,17 +94,16 @@ impl Server {
                             let upgraded = upgrade.await.unwrap(); // FIXME
                             let upgraded = upgraded.compat_write();
 
-                            let mut ws = WebSocketStream::from_raw_socket(
-                                upgraded,
-                                Role::Server,
-                                None,
-                            ).await;
+                            let mut ws =
+                                WebSocketStream::from_raw_socket(upgraded, Role::Server, None)
+                                    .await;
 
                             while let Ok(update) = markdown_rx.recv().await {
                                 if let Some(range) = update.range {
                                     todo!()
                                 } else {
-                                    ws.send(Message::Text(update.text)).await.unwrap(); // FIXME
+                                    ws.send(Message::Text(update.text)).await.unwrap();
+                                    // FIXME
                                 }
                             }
                         });
@@ -120,7 +124,10 @@ impl Server {
                         };
 
                         let html = Handlebars::new()
-                            .render_template(include_str!("../templates/markdown_view.html"), &template_data)
+                            .render_template(
+                                include_str!("../templates/markdown_view.html"),
+                                &template_data,
+                            )
                             .unwrap();
 
                         Response::builder()
@@ -168,20 +175,21 @@ mod tests {
     use std::net::SocketAddr;
 
     use futures::StreamExt;
-    use tokio::net::{ToSocketAddrs, lookup_host};
+    use tokio::net::{lookup_host, ToSocketAddrs};
 
     use super::{Server, Update};
 
     async fn new_server() -> Result<Server, Box<dyn Error>> {
-            let addr = lookup_host("localhost:0").await?.next().unwrap();
-            Ok(Server::bind(&addr).await?)
+        let addr = lookup_host("localhost:0").await?.next().unwrap();
+        Ok(Server::bind(&addr).await?)
     }
 
     #[tokio::test]
     async fn connect_html() -> Result<(), Box<dyn Error>> {
         let server = new_server().await?;
 
-        let body = reqwest::get(&format!("http://{}", server.addr())).await?
+        let body = reqwest::get(&format!("http://{}", server.addr()))
+            .await?
             .text()
             .await?;
 
@@ -203,7 +211,10 @@ mod tests {
     async fn send_with_no_clients() -> Result<(), Box<dyn Error>> {
         let server = new_server().await?;
 
-        server.send(Update { range: None, text: String::from("This shouldn't hang") });
+        server.send(Update {
+            range: None,
+            text: String::from("This shouldn't hang"),
+        });
 
         Ok(())
     }
@@ -212,7 +223,8 @@ mod tests {
     async fn send_html() -> Result<(), Box<dyn Error>> {
         let server = new_server().await?;
 
-        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+        let (mut websocket, _) =
+            async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
         server.send(Update {
             range: None,

@@ -8,6 +8,7 @@ use socket2::Socket;
 
 use aurelius::Server;
 
+/*
 #[test]
 fn not_found() -> Result<(), Box<dyn Error>> {
     let server = Server::bind("localhost:0")?;
@@ -134,3 +135,4 @@ fn static_file_not_found() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+*/
