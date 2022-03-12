@@ -71,7 +71,6 @@ use url::Url;
 
 use crate::id_map::IdMap;
 
-pub mod r#async;
 mod id_map;
 mod renderer;
 mod service;
@@ -155,6 +154,12 @@ where
     }
 }
 
+impl<R> Drop for Server<R> {
+    fn drop(&mut self) {
+
+    }
+}
+
 enum Signal {
     NewMarkdown,
     Close,
@@ -189,21 +194,23 @@ mod tests {
     use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
 
+    use futures::StreamExt;
     use matches::assert_matches;
-    use tungstenite::handshake::client::Request;
-    use tungstenite::Message;
-    use tungstenite::WebSocket;
     use tokio::net::{lookup_host, ToSocketAddrs};
+    use async_tungstenite::tungstenite::{Message, WebSocket};
+    use async_tungstenite::WebSocketStream;
+    use futures::{AsyncRead, AsyncWrite};
+    use tokio::time::{Duration, timeout};
 
     use crate::renderer::MarkdownRenderer;
 
     use super::Server;
 
-    fn assert_websocket_closed<S: Read + Write>(websocket: &mut WebSocket<S>) {
+    async fn assert_websocket_closed<S: AsyncRead + AsyncWrite + Unpin>(websocket: &mut WebSocketStream<S>) {
         loop {
-            match websocket.read_message() {
-                Ok(Message::Close(_)) => (),
-                Err(tungstenite::Error::ConnectionClosed) => break,
+            match websocket.next().await {
+                Some(Ok(Message::Close(_))) => (),
+                Some(Err(async_tungstenite::tungstenite::Error::ConnectionClosed)) => break,
                 other => panic!("unexpected connection state: {:?}", other),
             }
         }
@@ -258,68 +265,50 @@ mod tests {
         Ok(())
     }
 
-    /*
+    #[tokio::test]
+    async fn send_html() -> anyhow::Result<()> {
+        let server = new_server().await?;
 
-    #[test]
-    fn send_html() -> Result<(), Box<dyn Error>> {
-        let mut server = Server::bind("localhost:0")?;
-        let addr = server.addr();
+        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
-        let req = Request {
-            url: format!("ws://{}", addr).parse()?,
-            extra_headers: None,
-        };
-
-        let (mut websocket, _) = tungstenite::connect(req)?;
-
-        server.send(String::from("<p>Hello, world!</p>"))?;
-        let message = websocket.read_message()?;
+        server.send("<p>Hello, world!</p>").await?;
+        let message = websocket.next().await.unwrap()?;
         assert_eq!(message.to_text()?, "<p>Hello, world!</p>");
 
-        server.send(String::from("<p>Goodbye, world!</p>"))?;
-        let message = websocket.read_message()?;
+        server.send("<p>Goodbye, world!</p>").await?;
+        let message = websocket.next().await.unwrap()?;
         assert_eq!(message.to_text()?, "<p>Goodbye, world!</p>");
 
         Ok(())
     }
 
-    #[test]
-    fn send_markdown() -> Result<(), Box<dyn Error>> {
-        let mut server = Server::bind("localhost:0")?;
-        let addr = server.addr();
+    #[tokio::test]
+    async fn send_markdown() -> anyhow::Result<()> {
+        let server = new_server().await?;
 
-        let req = Request {
-            url: format!("ws://{}", addr).parse()?,
-            extra_headers: None,
-        };
+        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
-        let (mut websocket, _) = tungstenite::connect(req)?;
-
-        server.send(String::from("*Hello*"))?;
-        let message = websocket.read_message()?;
+        server.send("*Hello*").await?;
+        let message = websocket.next().await.unwrap()?;
         assert_eq!(message.to_text()?.trim(), "<p><em>Hello</em></p>");
 
         Ok(())
     }
 
-    #[test]
-    fn close_websockets_on_drop() -> Result<(), Box<dyn Error>> {
-        let server = Server::bind("localhost:0")?;
-        let addr = server.addr();
+    #[tokio::test]
+    async fn close_websockets_on_drop() -> Result<(), Box<dyn Error>> {
+        let server = new_server().await?;
 
-        let req = Request {
-            url: format!("ws://{}", addr).parse()?,
-            extra_headers: None,
-        };
-
-        let (mut websocket, _) = tungstenite::connect(req).unwrap();
+        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
         drop(server);
 
-        assert_websocket_closed(&mut websocket);
+        timeout(Duration::from_secs(5), assert_websocket_closed(&mut websocket)).await?;
 
         Ok(())
     }
+
+    /*
 
     #[test]
     fn queue_html_if_no_clients() -> Result<(), Box<dyn Error>> {

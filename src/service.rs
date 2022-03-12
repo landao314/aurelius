@@ -2,6 +2,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::path::PathBuf;
 
 use async_tungstenite::tokio::TokioAdapter;
 use async_tungstenite::tungstenite::error::ProtocolError;
@@ -15,6 +16,9 @@ use hyper::service::Service;
 use hyper::{Body, Request, Response, StatusCode};
 use log::*;
 use tokio::sync::broadcast::Sender;
+use url::Url;
+use serde::Serialize;
+use handlebars::Handlebars;
 
 struct Error {}
 
@@ -24,18 +28,15 @@ pub struct WebsocketBroadcastService {
 }
 
 impl WebsocketBroadcastService {
-    fn handle_request(&mut self, req: Request<Body>) -> Result<Response<Body>, Response<Body>> {
+    fn handle_request(&mut self, req: Request<Body>) -> Response<Body> {
         if is_websocket_upgrade(&req) {
-            let websocket_key = req
-                .headers()
-                .get("Sec-WebSocket-Key")
-                .ok_or_else(|| {
-                    Response::builder()
-                        .status(StatusCode::BAD_REQUEST)
-                        .body(ProtocolError::MissingSecWebSocketKey.to_string().into())
-                        .unwrap()
-                })?
-                .as_bytes();
+            let websocket_key = match req.headers().get("Sec-WebSocket-Key") {
+                Some(key) => key.as_bytes(),
+                None => return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(ProtocolError::MissingSecWebSocketKey.to_string().into())
+                    .unwrap(),
+            };
 
             let response = Response::builder()
                 .status(hyper::StatusCode::SWITCHING_PROTOCOLS)
@@ -70,9 +71,23 @@ impl WebsocketBroadcastService {
                 Ok::<_, anyhow::Error>(())
             });
 
-            Ok(response)
+            response
         } else {
-            todo!();
+            let html = Handlebars::new()
+                .render_template(
+                    include_str!("../templates/markdown_view.html"),
+                    &TemplateData {
+                        remote_custom_css: &[],
+                        local_custom_css: &[],
+                        highlight_theme: "github",
+                    }
+                )
+                .unwrap();
+
+            Response::builder()
+                .status(hyper::StatusCode::OK)
+                .body(Body::from(html))
+                .unwrap()
         }
     }
 }
@@ -82,20 +97,24 @@ impl Service<Request<Body>> for WebsocketBroadcastService {
     type Error = Infallible;
     type Future = Pin<Box<dyn Future<Output = Result<Response<Body>, Infallible>> + Send>>;
 
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
 
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         debug!("incoming request: {:?}", req);
 
-        let response = match self.handle_request(req) {
-            Ok(response) => response,
-            Err(e) => todo!(),
-        };
+        let response = self.handle_request(req);
 
         Box::pin(async move { Ok::<_, Infallible>(response) })
     }
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateData<'a> {
+    remote_custom_css: &'a [Url],
+    local_custom_css: &'a [PathBuf],
+    highlight_theme: &'a str,
 }
 
 fn is_websocket_upgrade<B>(request: &Request<B>) -> bool {
