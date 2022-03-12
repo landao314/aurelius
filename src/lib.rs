@@ -52,7 +52,6 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-use std::thread::JoinHandle;
 
 use buf_redux::BufReader;
 use crossbeam_utils::thread as crossbeam_thread;
@@ -66,8 +65,10 @@ use serde::Serialize;
 use sha1::{Digest, Sha1};
 use thiserror::Error;
 use tokio::sync::broadcast::{self, Sender};
+use tokio::task::JoinHandle;
 use tungstenite::{protocol::Role, Message, WebSocket};
 use url::Url;
+use tokio::sync::oneshot;
 
 use crate::id_map::IdMap;
 
@@ -75,10 +76,9 @@ mod id_map;
 mod renderer;
 mod service;
 
-use renderer::Renderer;
-use service::WebsocketBroadcastService;
+pub use renderer::{Renderer, MarkdownRenderer};
 
-const STATIC_FILES: Dir = include_dir!("static");
+use service::WebsocketBroadcastService;
 
 /// Markdown preview server.
 ///
@@ -89,12 +89,11 @@ pub struct Server<R> {
     local_addr: SocketAddr,
     tx: Sender<String>,
     renderer: R,
+    shutdown_tx: oneshot::Sender<()>,
 }
 
 #[derive(Error, Debug)]
-pub enum Error {
-
-}
+pub enum Error {}
 
 impl<R> Server<R>
 where
@@ -106,16 +105,13 @@ where
     /// assigned port.
     pub async fn bind(addr: &SocketAddr, renderer: R) -> anyhow::Result<Self> {
         let (tx, _) = broadcast::channel::<String>(16);
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
         let html_tx = tx.clone();
         let make_service = make_service_fn(move |_conn| {
             let html_tx = html_tx.clone();
 
-            async move {
-                Ok::<_, Infallible>(WebsocketBroadcastService {
-                    html_tx,
-                })
-            }
+            async move { Ok::<_, Infallible>(WebsocketBroadcastService { html_tx }) }
         });
 
         let http_server = hyper::Server::try_bind(addr)?.serve(make_service);
@@ -123,12 +119,17 @@ where
         let local_addr = http_server.local_addr();
         info!("listening on {:?}", local_addr);
 
+        let http_server = http_server.with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        });
+
         tokio::spawn(http_server);
 
         Ok(Server {
             local_addr,
             tx,
             renderer,
+            shutdown_tx,
         })
     }
 
@@ -146,17 +147,11 @@ where
     pub async fn send(&self, buffer: &str) -> anyhow::Result<()> {
         let mut output = Vec::with_capacity(buffer.len());
 
-        self.renderer.render(&buffer, &mut output)?;
+        self.renderer.render(buffer, &mut output)?;
 
         let _ = self.tx.send(String::from_utf8(output).unwrap());
 
         Ok(())
-    }
-}
-
-impl<R> Drop for Server<R> {
-    fn drop(&mut self) {
-
     }
 }
 
@@ -194,21 +189,26 @@ mod tests {
     use std::io::{Read, Write};
     use std::path::{Path, PathBuf};
 
-    use futures::StreamExt;
-    use matches::assert_matches;
-    use tokio::net::{lookup_host, ToSocketAddrs};
     use async_tungstenite::tungstenite::{Message, WebSocket};
     use async_tungstenite::WebSocketStream;
+    use futures::StreamExt;
     use futures::{AsyncRead, AsyncWrite};
-    use tokio::time::{Duration, timeout};
+    use matches::assert_matches;
+    use tokio::net::{lookup_host, ToSocketAddrs};
+    use tokio::time::{timeout, Duration};
 
     use crate::renderer::MarkdownRenderer;
 
     use super::Server;
 
-    async fn assert_websocket_closed<S: AsyncRead + AsyncWrite + Unpin>(websocket: &mut WebSocketStream<S>) {
+    async fn assert_websocket_closed<S: AsyncRead + AsyncWrite + Unpin>(
+        websocket: &mut WebSocketStream<S>,
+    ) {
         loop {
-            match websocket.next().await {
+            match timeout(Duration::from_secs(5), websocket.next())
+                .await
+                .unwrap()
+            {
                 Some(Ok(Message::Close(_))) => (),
                 Some(Err(async_tungstenite::tungstenite::Error::ConnectionClosed)) => break,
                 other => panic!("unexpected connection state: {:?}", other),
@@ -269,7 +269,8 @@ mod tests {
     async fn send_html() -> anyhow::Result<()> {
         let server = new_server().await?;
 
-        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+        let (mut websocket, _) =
+            async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
         server.send("<p>Hello, world!</p>").await?;
         let message = websocket.next().await.unwrap()?;
@@ -286,7 +287,8 @@ mod tests {
     async fn send_markdown() -> anyhow::Result<()> {
         let server = new_server().await?;
 
-        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+        let (mut websocket, _) =
+            async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
         server.send("*Hello*").await?;
         let message = websocket.next().await.unwrap()?;
@@ -299,11 +301,12 @@ mod tests {
     async fn close_websockets_on_drop() -> Result<(), Box<dyn Error>> {
         let server = new_server().await?;
 
-        let (mut websocket, _) = async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
+        let (mut websocket, _) =
+            async_tungstenite::tokio::connect_async(format!("ws://{}", server.addr())).await?;
 
         drop(server);
 
-        timeout(Duration::from_secs(5), assert_websocket_closed(&mut websocket)).await?;
+        assert_websocket_closed(&mut websocket).await;
 
         Ok(())
     }

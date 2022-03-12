@@ -1,5 +1,5 @@
-use std::error::Error;
 use pulldown_cmark::{html, Parser};
+use std::error::Error;
 use std::io::{self, Write};
 
 pub enum RenderError {}

@@ -1,8 +1,8 @@
 use std::convert::Infallible;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::path::PathBuf;
 
 use async_tungstenite::tokio::TokioAdapter;
 use async_tungstenite::tungstenite::error::ProtocolError;
@@ -11,14 +11,17 @@ use async_tungstenite::tungstenite::protocol::Role;
 use async_tungstenite::tungstenite::Message;
 use async_tungstenite::WebSocketStream;
 use futures_util::SinkExt;
+use handlebars::Handlebars;
 use hyper::header::{self, HeaderValue};
 use hyper::service::Service;
 use hyper::{Body, Request, Response, StatusCode};
 use log::*;
+use serde::Serialize;
 use tokio::sync::broadcast::Sender;
 use url::Url;
-use serde::Serialize;
-use handlebars::Handlebars;
+use include_dir::{Dir, include_dir};
+
+const STATIC_FILES: Dir = include_dir!("$CARGO_MANIFEST_DIR/static");
 
 struct Error {}
 
@@ -32,10 +35,12 @@ impl WebsocketBroadcastService {
         if is_websocket_upgrade(&req) {
             let websocket_key = match req.headers().get("Sec-WebSocket-Key") {
                 Some(key) => key.as_bytes(),
-                None => return Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(ProtocolError::MissingSecWebSocketKey.to_string().into())
-                    .unwrap(),
+                None => {
+                    return Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(ProtocolError::MissingSecWebSocketKey.to_string().into())
+                        .unwrap()
+                }
             };
 
             let response = Response::builder()
@@ -68,26 +73,62 @@ impl WebsocketBroadcastService {
                     ws.send(Message::Text(html)).await?;
                 }
 
+                let _ = ws.send(Message::Close(None)).await;
+
                 Ok::<_, anyhow::Error>(())
             });
 
             response
         } else {
-            let html = Handlebars::new()
-                .render_template(
-                    include_str!("../templates/markdown_view.html"),
-                    &TemplateData {
-                        remote_custom_css: &[],
-                        local_custom_css: &[],
-                        highlight_theme: "github",
-                    }
-                )
-                .unwrap();
+            self.serve_file(req)
+        }
+    }
 
-            Response::builder()
-                .status(hyper::StatusCode::OK)
-                .body(Body::from(html))
-                .unwrap()
+    fn serve_file(&self, req: Request<Body>) -> Response<Body> {
+        match req.uri().path() {
+            "/" => {
+                let html = Handlebars::new()
+                    .render_template(
+                        include_str!("../templates/markdown_view.html"),
+                        &TemplateData {
+                            remote_custom_css: &[],
+                            local_custom_css: &[],
+                            highlight_theme: "github",
+                        },
+                    )
+                    .unwrap();
+
+                Response::builder()
+                    .status(hyper::StatusCode::OK)
+                    .body(Body::from(html))
+                    .unwrap()
+            }
+            path if path.starts_with("/__/") => {
+                let path = path.trim_start_matches("/__/");
+
+                let contents = match STATIC_FILES.get_file(path) {
+                    Some(file) => file.contents(),
+                    None => {
+                        error!("{} not found in static files", path);
+                        return Response::builder()
+                            .status(StatusCode::NOT_FOUND)
+                            .body(Body::empty())
+                            .unwrap();
+                    }
+                };
+
+                let mime = mime_guess::from_path(path);
+
+                Response::builder()
+                    .status(hyper::StatusCode::OK)
+                    .header(header::CONTENT_TYPE, mime.first_or_octet_stream().to_string())
+                    .body(Body::from(contents))
+                    .unwrap()
+            }
+            _ => Response::builder()
+                .status(hyper::StatusCode::NOT_FOUND)
+                .body(Body::empty())
+                .unwrap(),
         }
     }
 }
